@@ -1,72 +1,57 @@
-import os
 import gradio as gr
 import spaces
-from smolagents import CodeAgent, InferenceClientModel
-from tools import search_arxiv
+from smolagents import stream_to_gradio
 
-model = InferenceClientModel(
-    model_id="Qwen/Qwen2.5-Coder-32B-Instruct",
-    token=os.environ.get("HF_TOKEN")
-)
+from guardrails import check_user_input
+from research_agents import MODEL_ID, build_agent
 
-agent = CodeAgent(
-    tools=[search_arxiv], 
-    model=model,
-    add_base_tools=False,
-    max_steps=5
-)
+# One agent per browser session, so each user gets their own conversation memory.
+_session_agents = {}
+
 
 # 1. THE DECOY: Passes the HF startup check so the container boots
 @spaces.GPU
 def decoy_function():
     pass
 
-# 2. THE ACTUAL CHAT: Runs on the free background CPU without touching your quota
-def agent_chat(user_prompt):
-    return agent.run(user_prompt)
 
-demo = gr.Interface(
+# 2. THE ACTUAL CHAT: Runs on the free background CPU without touching your quota
+def agent_chat(message: str, history: list, request: gr.Request):
+    refusal = check_user_input(message)
+    if refusal:
+        yield refusal
+        return
+
+    session_id = request.session_hash if request else "default"
+    if session_id not in _session_agents:
+        _session_agents[session_id] = build_agent()
+    agent = _session_agents[session_id]
+
+    # Each agent step (code, tool output, errors) is shown as a collapsible message, followed by the final answer.
+    messages = []
+    try:
+        for msg in stream_to_gradio(agent, task=message, reset_agent_memory=False):
+            if isinstance(msg, gr.ChatMessage):
+                messages.append(msg)
+                yield messages
+    except Exception as e:
+        messages.append(gr.ChatMessage(role="assistant", content=f"Sorry, something went wrong: {e}"))
+        yield messages
+
+
+demo = gr.ChatInterface(
     fn=agent_chat,
-    inputs=gr.Textbox(lines=2, placeholder="E.g., Find 2 recent papers on Agentic AI and format them as BibTeX."),
-    outputs=gr.Markdown(label="Agent Output"),
     title="Autonomous arXiv Research Agent",
-    description="Powered by smolagents and Qwen 2.5 Coder"
+    description=(
+        f"Powered by smolagents and {MODEL_ID}. Search arXiv, read and summarize full papers, and get accurate "
+        "BibTeX. Follow-up questions remember the conversation."
+    ),
+    examples=[
+        "Find 2 recent papers on Agentic AI in cs.AI and format them as BibTeX.",
+        "Summarize the paper 1706.03762 and focus on how attention works.",
+        "Find 3 papers on retrieval-augmented generation and compare their approaches.",
+    ],
+    run_examples_on_click=False,
 )
 
 demo.launch()
-
-# import os
-# import gradio as gr
-# import spaces
-# from smolagents import CodeAgent, InferenceClientModel
-# from tools import search_arxiv
-
-# # 1. Initialize Qwen 2.5 Coder via the Serverless API
-# model = InferenceClientModel(
-#     model_id="Qwen/Qwen2.5-Coder-32B-Instruct",
-#     token=os.environ.get("HF_TOKEN")
-# )
-
-# # 2. Assemble the CodeAgent
-# agent = CodeAgent(
-#     tools=[search_arxiv], 
-#     model=model,
-#     add_base_tools=False,
-#     max_steps=5
-# )
-
-# # 3. Define the execution function and request ZeroGPU allocation
-# @spaces.GPU
-# def agent_chat(user_prompt):
-#     return agent.run(user_prompt)
-
-# # 4. Launch the Gradio Chat Interface
-# demo = gr.Interface(
-#     fn=agent_chat,
-#     inputs=gr.Textbox(lines=2, placeholder="E.g., Find 2 recent papers on Agentic AI and format them as BibTeX."),
-#     outputs=gr.Markdown(label="Agent Output"),
-#     title="Autonomous arXiv Research Agent",
-#     description="Powered by smolagents and Qwen 2.5 Coder"
-# )
-
-# demo.launch()
